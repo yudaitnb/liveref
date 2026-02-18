@@ -18,7 +18,7 @@ function applyEvent(state: HeapState, e: DeltaEvent, stepId: StepId) {
   switch (e.t) {
     case "alloc": {
       if (!state.objects[e.obj]) {
-        state.objects[e.obj] = { id: e.obj, objKind: e.objKind, props: {} };
+        state.objects[e.obj] = { id: e.obj, objKind: e.objKind, className: e.className, props: {} };
       }
       return;
     }
@@ -26,26 +26,26 @@ function applyEvent(state: HeapState, e: DeltaEvent, stepId: StepId) {
       const o = state.objects[e.obj];
       if (!o) return;
       o.props[e.key] = e.val as ValueRef;
-      state.lastWrite[lastWriteKey(e.obj, e.key)] = { stepId, locId: e.locId };
+      state.lastWrite[lastWriteKey(e.obj, e.key)] = { stepId, checkpointId: e.checkpointId };
       return;
     }
     case "delete": {
       const o = state.objects[e.obj];
       if (!o) return;
       delete o.props[e.key];
-      state.lastWrite[lastWriteKey(e.obj, e.key)] = { stepId, locId: e.locId };
+      state.lastWrite[lastWriteKey(e.obj, e.key)] = { stepId, checkpointId: e.checkpointId };
       return;
     }
 
     // ★追加
     case "rootSet": {
       state.roots[e.name] = e.val as ValueRef;
-      state.lastWrite[rootWriteKey(e.name)] = { stepId, locId: e.locId };
+      state.lastWrite[rootWriteKey(e.name)] = { stepId, checkpointId: e.checkpointId };
       return;
     }
     case "rootDel": {
       delete state.roots[e.name];
-      state.lastWrite[rootWriteKey(e.name)] = { stepId, locId: e.locId };
+      state.lastWrite[rootWriteKey(e.name)] = { stepId, checkpointId: e.checkpointId };
       return;
     }
   }

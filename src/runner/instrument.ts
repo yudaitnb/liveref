@@ -6,10 +6,17 @@ function shouldRecordRoot(name: string) {
   return !INTERNAL_NAME_RE.test(name);
 }
 
-function locIdOf(node: any): string {
+function checkpointStartIdOf(node: any): string {
   const line = node.loc?.start?.line ?? 1;     // Babel line は 1-based
   const col0 = node.loc?.start?.column ?? 0;   // Babel column は 0-based
   const col1 = col0 + 1;                       // Monaco 用に 1-basedへ
+  return `L${line}:${col1}`;
+}
+
+function checkpointAfterIdOf(node: any): string {
+  const line = node.loc?.end?.line ?? node.loc?.start?.line ?? 1;
+  const col0 = node.loc?.end?.column ?? node.loc?.start?.column ?? 0;
+  const col1 = col0 + 1;
   return `L${line}:${col1}`;
 }
 
@@ -27,33 +34,32 @@ export function instrument(code: string): string {
   const instrumentPlugin = (babel: any) => {
     const t = babel.types;
 
-    const mkTrace = (locId: string) =>
+    const mkCheckpoint = (checkpointId: string) =>
       markGen(
         t.expressionStatement(
-          t.callExpression(t.identifier("__trace"), [t.stringLiteral(locId)])
+          t.callExpression(t.identifier("__checkpoint"), [t.stringLiteral(checkpointId)])
         )
       );
 
-    const isTraceStmt = (stmt: any) =>
+    const isCheckpointStmt = (stmt: any) =>
       t.isExpressionStatement(stmt) &&
       t.isCallExpression(stmt.expression) &&
-      t.isIdentifier(stmt.expression.callee, { name: "__trace" });
+      t.isIdentifier(stmt.expression.callee, { name: "__checkpoint" });
 
-    const shouldInstrumentStmt = (stmt: any) => {
-      if (isTraceStmt(stmt)) return false;
+    const isTerminalControlStmt = (stmt: any) =>
+      t.isReturnStatement(stmt) ||
+      t.isThrowStatement(stmt) ||
+      t.isBreakStatement(stmt) ||
+      t.isContinueStatement(stmt);
+
+    const canCheckpointStmt = (stmt: any) => {
+      if (isCheckpointStmt(stmt)) return false;
       if (isGen(stmt)) return false;
 
-      // ★内部生成stmtは loc が無いことが多いので、loc無しstmtにも trace を入れない
+      // ★内部生成stmtは loc が無いことが多いので、loc無しstmtにも checkpoint を入れない
       if (!stmt.loc) return false;
 
-      if (
-        t.isEmptyStatement(stmt) ||
-        t.isReturnStatement(stmt) ||
-        t.isThrowStatement(stmt) ||
-        t.isBreakStatement(stmt) ||
-        t.isContinueStatement(stmt)
-      )
-        return false;
+      if (t.isEmptyStatement(stmt)) return false;
 
       return true;
     };
@@ -64,8 +70,108 @@ export function instrument(code: string): string {
       sub.replaceWith(t.blockStatement([sub.node]));
     };
 
+    const mkRootSetStmt = (name: string, checkpointId: string) =>
+      markGen(
+        t.expressionStatement(
+          t.callExpression(t.identifier("__setVar"), [
+            t.stringLiteral(name),
+            t.identifier(name),
+            t.stringLiteral(checkpointId),
+          ])
+        )
+      );
+
+    const withCheckpointExpr = (expr: any, checkpointId: string) => {
+      const tmp = t.identifier("__cp_result");
+      return t.callExpression(
+        t.arrowFunctionExpression(
+          [],
+          t.blockStatement([
+            t.variableDeclaration("const", [t.variableDeclarator(tmp, t.cloneNode(expr, true))]),
+            t.expressionStatement(
+              t.callExpression(t.identifier("__checkpoint"), [t.stringLiteral(checkpointId)])
+            ),
+            t.returnStatement(t.cloneNode(tmp)),
+          ])
+        ),
+        []
+      );
+    };
+
+    const collectIdsFromPattern = (node: any, out: Set<string>) => {
+      if (!node) return;
+      if (t.isIdentifier(node)) {
+        if (shouldRecordRoot(node.name)) out.add(node.name);
+        return;
+      }
+      if (t.isObjectPattern(node)) {
+        for (const p of node.properties) {
+          if (t.isRestElement(p)) collectIdsFromPattern(p.argument, out);
+          else if (t.isObjectProperty(p)) collectIdsFromPattern(p.value, out);
+        }
+        return;
+      }
+      if (t.isArrayPattern(node)) {
+        for (const e of node.elements) {
+          if (!e) continue;
+          if (t.isRestElement(e)) collectIdsFromPattern(e.argument, out);
+          else collectIdsFromPattern(e, out);
+        }
+        return;
+      }
+      if (t.isAssignmentPattern(node)) {
+        collectIdsFromPattern(node.left, out);
+      }
+    };
+
     return {
       visitor: {
+        Function(path: any) {
+          if (path.isArrowFunctionExpression() && !path.get("body").isBlockStatement()) return;
+          if (path.isClassMethod() && path.node.kind === "constructor") return;
+
+          const bodyPath = path.get("body");
+          if (!bodyPath?.isBlockStatement?.()) return;
+
+          const localNames = new Set<string>();
+          for (const p of path.node.params ?? []) collectIdsFromPattern(p, localNames);
+
+          path.traverse({
+            Function(inner: any) {
+              if (inner !== path) inner.skip();
+            },
+            VariableDeclarator(vp: any) {
+              collectIdsFromPattern(vp.node.id, localNames);
+            },
+            CatchClause(cp: any) {
+              collectIdsFromPattern(cp.node.param, localNames);
+            },
+          });
+
+          if (localNames.size === 0) return;
+
+          const cpId = checkpointAfterIdOf(path.node);
+          const cleanup = Array.from(localNames)
+            .sort()
+            .map((name) =>
+              markGen(
+                t.expressionStatement(
+                  t.callExpression(t.identifier("__deleteVar"), [
+                    t.stringLiteral(name),
+                    t.stringLiteral(cpId),
+                  ])
+                )
+              )
+            );
+
+          const originalBody = bodyPath.node;
+          bodyPath.replaceWith(
+            t.blockStatement([
+              t.tryStatement(originalBody, null, t.blockStatement(cleanup)),
+            ])
+          );
+        },
+
         IfStatement(path: any) {
           ensureBlock(path, "consequent");
           const alt = path.get("alternate");
@@ -90,7 +196,7 @@ export function instrument(code: string): string {
             return;
           }
 
-          const locId = locIdOf(path.node);
+          const checkpointId = checkpointStartIdOf(path.node);
           // ★内部名は _o に寄せる（root記録フィルタが確実に当たる）
           const tmp = path.scope.generateUidIdentifier("_o");
           const stmts: any[] = [];
@@ -120,7 +226,7 @@ export function instrument(code: string): string {
                       tmp,
                       keyExpr,
                       p.value,
-                      t.stringLiteral(locId),
+                      t.stringLiteral(checkpointId),
                     ])
                   )
                 )
@@ -145,7 +251,7 @@ export function instrument(code: string): string {
             return;
           }
 
-          const locId = locIdOf(path.node);
+          const checkpointId = checkpointStartIdOf(path.node);
           const tmp = path.scope.generateUidIdentifier("_a");
           const stmts: any[] = [];
 
@@ -169,7 +275,7 @@ export function instrument(code: string): string {
                     tmp,
                     t.stringLiteral(String(i)),
                     el,
-                    t.stringLiteral(locId),
+                    t.stringLiteral(checkpointId),
                   ])
                 )
               )
@@ -183,38 +289,76 @@ export function instrument(code: string): string {
           );
         },
 
-        // x = rhs  -> __setVar("x", rhs, locId)（内部名は除外）
+        // x = rhs  -> __setVar("x", rhs, checkpointId)（内部名は除外）
         // obj.k = rhs -> __writeProp(...)
+        // and always add an expression-level checkpoint around assignment.
         AssignmentExpression(path: any) {
           const { operator, left, right } = path.node;
-          if (operator !== "=") return;
-          const locId = locIdOf(path.node);
+          const checkpointId = checkpointAfterIdOf(path.node);
 
           if (t.isMemberExpression(left) && !left.optional) {
             const obj = left.object;
             const prop = left.computed ? left.property : t.stringLiteral(left.property.name);
 
-            path.replaceWith(
-              t.callExpression(t.identifier("__writeProp"), [
-                obj,
-                prop,
-                right,
-                t.stringLiteral(locId),
-              ])
-            );
+            if (operator !== "=") {
+              path.replaceWith(withCheckpointExpr(path.node, checkpointId));
+              path.skip();
+              return;
+            }
+
+            const replaced = t.callExpression(t.identifier("__writeProp"), [
+              obj,
+              prop,
+              right,
+              t.stringLiteral(checkpointId),
+            ]);
+            path.replaceWith(withCheckpointExpr(replaced, checkpointId));
+            path.skip();
             return;
           }
 
-          if (t.isIdentifier(left)) {
-            if (!shouldRecordRoot(left.name)) return; // ★内部名はrootにしない
-            path.replaceWith(
-              t.callExpression(t.identifier("__setVar"), [
-                t.stringLiteral(left.name),
-                right,
-                t.stringLiteral(locId),
-              ])
-            );
+          if (operator !== "=") {
+            path.replaceWith(withCheckpointExpr(path.node, checkpointId));
+            path.skip();
+            return;
           }
+
+          if (t.isIdentifier(left) && shouldRecordRoot(left.name)) {
+            const replaced = t.callExpression(t.identifier("__setVar"), [
+              t.stringLiteral(left.name),
+              right,
+              t.stringLiteral(checkpointId),
+            ]);
+            path.replaceWith(withCheckpointExpr(replaced, checkpointId));
+            path.skip();
+            return;
+          }
+
+          // Fallback: non-root identifiers / patterns are still checkpointed.
+          path.replaceWith(withCheckpointExpr(path.node, checkpointId));
+          path.skip();
+        },
+
+        // Method/function calls also get expression-level checkpoints.
+        CallExpression(path: any) {
+          const callee = path.node.callee;
+          if (
+            t.isIdentifier(callee) &&
+            (callee.name === "__checkpoint" ||
+              callee.name === "__setVar" ||
+              callee.name === "__writeProp" ||
+              callee.name === "__deleteProp" ||
+              callee.name === "__deleteVar" ||
+              callee.name === "__val")
+          ) {
+            return;
+          }
+          if (t.isSuper(callee)) return;
+          if (path.findParent((p: any) => isGen(p.node))) return;
+
+          const checkpointId = checkpointAfterIdOf(path.node);
+          path.replaceWith(withCheckpointExpr(path.node, checkpointId));
+          path.skip();
         },
 
         // delete obj.k -> __deleteProp(...)
@@ -222,20 +366,20 @@ export function instrument(code: string): string {
           if (path.node.operator !== "delete") return;
           const arg = path.node.argument;
           if (t.isMemberExpression(arg) && !arg.optional) {
-            const locId = locIdOf(path.node);
+            const checkpointId = checkpointAfterIdOf(path.node);
             const obj = arg.object;
             const prop = arg.computed ? arg.property : t.stringLiteral(arg.property.name);
             path.replaceWith(
               t.callExpression(t.identifier("__deleteProp"), [
                 obj,
                 prop,
-                t.stringLiteral(locId),
+                t.stringLiteral(checkpointId),
               ])
             );
           }
         },
 
-        // const x = init -> const x = __setVar("x", init, locId)（内部名は除外）
+        // const x = init -> const x = __setVar("x", init, checkpointId)（内部名は除外）
         VariableDeclarator(path: any) {
           if (!t.isIdentifier(path.node.id)) return;
           if (!path.node.init) return;
@@ -243,21 +387,42 @@ export function instrument(code: string): string {
           const name = path.node.id.name;
           if (!shouldRecordRoot(name)) return; // ★内部名はrootにしない
 
-          const locId = locIdOf(path.node);
+          const checkpointId = checkpointAfterIdOf(path.node);
           path.node.init = t.callExpression(t.identifier("__setVar"), [
             t.stringLiteral(name),
             path.node.init,
-            t.stringLiteral(locId),
+            t.stringLiteral(checkpointId),
           ]);
         },
+        FunctionDeclaration(path: any) {
+          const id = path.node.id;
+          if (!id || !shouldRecordRoot(id.name)) return;
+          if (!path.node.loc) return;
+          path.insertAfter(mkRootSetStmt(id.name, checkpointStartIdOf(path.node)));
+        },
+        ClassDeclaration(path: any) {
+          const id = path.node.id;
+          if (!id || !shouldRecordRoot(id.name)) return;
+          if (!path.node.loc) return;
+          path.insertAfter(mkRootSetStmt(id.name, checkpointStartIdOf(path.node)));
+        },
 
-        // ★重要：trace の挿入は “変換後” にやる（exit）
+        // ★重要：checkpoint の挿入は “変換後” にやる（exit）
         Program: {
           exit(path: any) {
             const body: any[] = [];
             for (const stmt of path.node.body) {
+              if (!canCheckpointStmt(stmt)) {
+                body.push(stmt);
+                continue;
+              }
+              if (isTerminalControlStmt(stmt)) {
+                body.push(mkCheckpoint(checkpointStartIdOf(stmt)));
+                body.push(stmt);
+                continue;
+              }
               body.push(stmt);
-              if (shouldInstrumentStmt(stmt)) body.push(mkTrace(locIdOf(stmt)));
+              body.push(mkCheckpoint(checkpointAfterIdOf(stmt)));
             }
             path.node.body = body;
           },
@@ -266,8 +431,17 @@ export function instrument(code: string): string {
           exit(path: any) {
             const body: any[] = [];
             for (const stmt of path.node.body) {
+              if (!canCheckpointStmt(stmt)) {
+                body.push(stmt);
+                continue;
+              }
+              if (isTerminalControlStmt(stmt)) {
+                body.push(mkCheckpoint(checkpointStartIdOf(stmt)));
+                body.push(stmt);
+                continue;
+              }
               body.push(stmt);
-              if (shouldInstrumentStmt(stmt)) body.push(mkTrace(locIdOf(stmt)));
+              body.push(mkCheckpoint(checkpointAfterIdOf(stmt)));
             }
             path.node.body = body;
           },
@@ -279,6 +453,15 @@ export function instrument(code: string): string {
   const out = Babel.transform(code, {
     ast: false,
     sourceType: "script",
+    parserOpts: {
+      plugins: [
+        "classProperties",
+        "classPrivateProperties",
+        "classPrivateMethods",
+        "optionalChaining",
+        "nullishCoalescingOperator",
+      ],
+    },
     plugins: [instrumentPlugin],
     generatorOpts: { retainLines: true, compact: false, comments: true },
   });

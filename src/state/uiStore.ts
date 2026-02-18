@@ -1,17 +1,23 @@
 import { create } from "zustand";
 
 type UIState = {
-  selectedLocId: string | null;
+  selectedCheckpointId: string | null;
   selectedStep: number;
+  selectedVarName: string | null;
 
-  setSelectedLocId: (locId: string | null) => void;
+  setSelectedCheckpointId: (checkpointId: string | null) => void;
   setSelectedStep: (step: number) => void;
+  setSelectedVarName: (name: string | null) => void;
+  resetUI: () => void;
 };
 
 export const useUIStore = create<UIState>((set) => ({
-  selectedLocId: null,
+  selectedCheckpointId: null,
   selectedStep: 0,
+  selectedVarName: null,
 
-  setSelectedLocId: (locId) => set({ selectedLocId: locId }),
+  setSelectedCheckpointId: (checkpointId) => set({ selectedCheckpointId: checkpointId }),
   setSelectedStep: (step) => set({ selectedStep: step }),
+  setSelectedVarName: (name) => set({ selectedVarName: name }),
+  resetUI: () => set({ selectedCheckpointId: null, selectedStep: 0, selectedVarName: null }),
 }));

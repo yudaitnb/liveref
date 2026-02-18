@@ -1,6 +1,6 @@
 export type StepId = number;
 export type ObjId = string;
-export type LocId = string;
+export type CheckpointId = string;
 export type Key = string;
 
 export type Primitive = null | undefined | boolean | number | string | bigint;
@@ -11,28 +11,30 @@ export type ValueRef =
 
 export type StepMeta = {
   stepId: StepId;
-  locId?: LocId;
+  checkpointId?: CheckpointId;
+  varNames?: string[];
   deltaFrom: number;
   deltaTo: number;
 };
 
 export type DeltaEvent =
-  | { t: "alloc"; obj: ObjId; objKind: "object" | "array" | "function" | "class" }
-  | { t: "write"; obj: ObjId; key: Key; val: ValueRef; locId?: LocId }
-  | { t: "delete"; obj: ObjId; key: Key; locId?: LocId }
-  | { t: "rootSet"; name: string; val: ValueRef; locId?: LocId }
-  | { t: "rootDel"; name: string; locId?: LocId };
+  | { t: "alloc"; obj: ObjId; objKind: "object" | "array" | "function" | "class"; className?: string }
+  | { t: "write"; obj: ObjId; key: Key; val: ValueRef; checkpointId?: CheckpointId }
+  | { t: "delete"; obj: ObjId; key: Key; checkpointId?: CheckpointId }
+  | { t: "rootSet"; name: string; val: ValueRef; checkpointId?: CheckpointId }
+  | { t: "rootDel"; name: string; checkpointId?: CheckpointId };
 
 export type HeapObject = {
   id: ObjId;
   objKind: "object" | "array" | "function" | "class";
+  className?: string;
   props: Record<Key, ValueRef>;
 };
 
 export type HeapState = {
   objects: Record<ObjId, HeapObject>;
   roots: Record<string, ValueRef>;
-  lastWrite: Record<string, { stepId: StepId; locId?: LocId }>;
+  lastWrite: Record<string, { stepId: StepId; checkpointId?: CheckpointId }>;
 };
 
 export type Snapshot = {

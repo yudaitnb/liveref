@@ -1,7 +1,7 @@
 import * as Comlink from "comlink";
 import type { RunnerApi, RunnerOptions, RunResult, LogEntry, LogLevel } from "./runnerTypes";
-import type { LocId } from "../trace/types";
-import { TraceRecorder } from "./traceRecorder";
+import type { CheckpointId } from "../trace/types";
+import { CheckpointRecorder } from "./checkpointRecorder";
 import { instrument } from "./instrument";
 
 function safeSerialize(value: any, maxDepth = 4): any {
@@ -54,19 +54,20 @@ const api: RunnerApi = {
     const oldConsole = (globalThis as any).console;
     (globalThis as any).console = consoleProxy;
 
-    // === trace runtime ===
-    const rec = new TraceRecorder(opts?.snapshotEveryNSteps ?? 50);
+    // === checkpoint runtime ===
+    const rec = new CheckpointRecorder(opts?.snapshotEveryNSteps ?? 50);
 
-    // expose minimal tracing API for now (Babel later auto-inserts these calls)
+    // expose minimal checkpoint API for now (Babel later auto-inserts these calls)
     const g: any = globalThis;
 
-    const oldTrace = g.__trace;
+    const oldCheckpoint = g.__checkpoint;
     const oldVal = g.__val;
     const oldWrite = g.__writeProp;
     const oldDel = g.__deleteProp;
     const oldRoot = g.__setVar;
+    const oldDelVar = g.__deleteVar;
 
-    g.__trace = (locId?: LocId) => rec.traceStep(locId);
+    g.__checkpoint = (checkpointId?: CheckpointId) => rec.checkpointStep(checkpointId);
 
     g.__val = (v: any) => {
       // ensure obj ids for objects/functions
@@ -74,13 +75,13 @@ const api: RunnerApi = {
       return v;
     };
 
-    g.__writeProp = (base: any, key: any, val: any, locId?: LocId) => {
+    g.__writeProp = (base: any, key: any, val: any, checkpointId?: CheckpointId) => {
       // evaluate once
       const k = String(key);
       const baseRef = rec.toValueRef(base);
       const valRef = rec.toValueRef(val);
       if (baseRef.kind === "obj") {
-        rec.write(baseRef.id, k, valRef, locId);
+        rec.write(baseRef.id, k, valRef, checkpointId);
       }
       // perform real write
       try {
@@ -91,11 +92,11 @@ const api: RunnerApi = {
       return val;
     };
 
-    g.__deleteProp = (base: any, key: any, locId?: LocId) => {
+    g.__deleteProp = (base: any, key: any, checkpointId?: CheckpointId) => {
       const k = String(key);
       const baseRef = rec.toValueRef(base);
       if (baseRef.kind === "obj") {
-        rec.del(baseRef.id, k, locId);
+        rec.del(baseRef.id, k, checkpointId);
       }
       try {
         delete base[k];
@@ -104,10 +105,15 @@ const api: RunnerApi = {
       }
     };
 
-    g.__setVar = (name: string, val: any, locId?: LocId) => {
+    g.__setVar = (name: string, val: any, checkpointId?: CheckpointId) => {
       const ref = rec.toValueRef(val);
-      rec.rootSet(String(name), ref, locId);
+      rec.rootSet(String(name), ref, checkpointId);
       return val;
+    };
+
+    g.__deleteVar = (name: string, checkpointId?: CheckpointId) => {
+      rec.rootDel(String(name), checkpointId);
+      return undefined;
     };
 
     try {
@@ -116,13 +122,13 @@ const api: RunnerApi = {
       const result = fn();
 
       // program end boundary (見やすくするため)
-      rec.traceStep("__end__");
+      rec.checkpointStep("__end__");
 
       return { ok: true, logs, result: safeSerialize(result), trace: rec.trace };
     } catch (e: any) {
       const err = e instanceof Error ? e : new Error(String(e));
       // 例外でも trace は返す
-      rec.traceStep("__end__");
+      rec.checkpointStep("__end__");
       return {
         ok: false,
         logs,
@@ -132,11 +138,12 @@ const api: RunnerApi = {
     } finally {
       // restore globals
       (globalThis as any).console = oldConsole;
-      g.__trace = oldTrace;
+      g.__checkpoint = oldCheckpoint;
       g.__val = oldVal;
       g.__writeProp = oldWrite;
       g.__deleteProp = oldDel;
       g.__setVar = oldRoot;
+      g.__deleteVar = oldDelVar;
     }
   },
 };
