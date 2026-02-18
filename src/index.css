@@ -1,0 +1,65 @@
+/* index.css - fullscreen app baseline */
+
+/* 1) Make the app take the whole viewport */
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+}
+
+/* 2) Baseline typography */
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* Keep your idea of light/dark without forcing colors everywhere */
+  color-scheme: light dark;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 3) Remove Vite template centering that shrinks the layout */
+body {
+  display: block; /* was flex */
+  min-width: 0;   /* allow panels to shrink normally */
+  min-height: 0;
+}
+
+/* 4) Links */
+a {
+  font-weight: 500;
+  text-decoration: inherit;
+}
+
+/* 5) Optional: a neutral app background.
+   Remove if you want to control background per-pane. */
+body {
+  background: #242424;
+  color: rgba(255, 255, 255, 0.87);
+}
+
+/* 6) Make radix triggers/buttons not inherit the Vite demo button style */
+button {
+  font: inherit;
+}
+
+/* Monaco decoration: selected line highlight */
+.monaco-editor .loc-highlight-line {
+  background: rgba(255, 80, 80, 0.20);
+}
+
+/* Monaco glyph margin marker (trace point) */
+.monaco-editor .trace-glyph {
+  background: rgba(255, 80, 80, 0.9);
+  border-radius: 50%;
+  width: 8px !important;
+  height: 8px !important;
+  margin-left: 6px;
+  margin-top: 6px;
+}
