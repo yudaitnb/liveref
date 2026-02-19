@@ -66,6 +66,8 @@ const api: RunnerApi = {
     const oldDel = g.__deleteProp;
     const oldRoot = g.__setVar;
     const oldDelVar = g.__deleteVar;
+    const oldCallEnter = g.__callEnter;
+    const oldCallExit = g.__callExit;
 
     g.__checkpoint = (checkpointId?: CheckpointId) => rec.checkpointStep(checkpointId);
 
@@ -116,19 +118,22 @@ const api: RunnerApi = {
       return undefined;
     };
 
+    g.__callEnter = (fnName: string, checkpointId?: CheckpointId) => {
+      rec.callEnter(String(fnName || "anonymous"), checkpointId);
+    };
+
+    g.__callExit = (fnName: string, checkpointId?: CheckpointId) => {
+      rec.callExit(String(fnName || "anonymous"), checkpointId);
+    };
+
     try {
       const compiled = instrument(code);
       const fn = new Function(`"use strict";\n${compiled}\n`);
       const result = fn();
 
-      // program end boundary (見やすくするため)
-      rec.checkpointStep("__end__");
-
       return { ok: true, logs, result: safeSerialize(result), trace: rec.trace };
     } catch (e: any) {
       const err = e instanceof Error ? e : new Error(String(e));
-      // 例外でも trace は返す
-      rec.checkpointStep("__end__");
       return {
         ok: false,
         logs,
@@ -144,6 +149,8 @@ const api: RunnerApi = {
       g.__deleteProp = oldDel;
       g.__setVar = oldRoot;
       g.__deleteVar = oldDelVar;
+      g.__callEnter = oldCallEnter;
+      g.__callExit = oldCallExit;
     }
   },
 };

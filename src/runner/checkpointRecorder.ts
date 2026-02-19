@@ -37,7 +37,10 @@ export class CheckpointRecorder {
     steps: [],
     events: [],
     snapshots: [],
+    callEvents: [],
   };
+
+  private callIdSeq = 1;
 
   constructor(snapshotEveryNSteps: number) {
     this.snapshotEvery = Math.max(1, snapshotEveryNSteps);
@@ -158,5 +161,25 @@ export class CheckpointRecorder {
 
     this.stepId += 1;
     this.stepStartEventIndex = this.trace.events.length;
+  }
+
+  callEnter(fnName: string, checkpointId?: CheckpointId) {
+    this.trace.callEvents.push({
+      callId: this.callIdSeq++,
+      kind: "enter",
+      fnName,
+      stepId: this.stepId,
+      checkpointId,
+    });
+  }
+
+  callExit(fnName: string, checkpointId?: CheckpointId) {
+    this.trace.callEvents.push({
+      callId: this.callIdSeq++,
+      kind: "exit",
+      fnName,
+      stepId: this.stepId,
+      checkpointId,
+    });
   }
 }

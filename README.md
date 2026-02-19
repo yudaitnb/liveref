@@ -97,10 +97,25 @@ Your site URL will be:
 ## How to Use
 
 1. Open the app and edit JavaScript in the left `Editor` tab.
-2. Click `Run` to execute code and generate a trace.
-3. Use the right `Heap Graph` timeline controls (buttons/slider or arrow keys) to move between steps.
-4. Check the `Console` tab for logs and runtime errors.
-5. Click graph edges to jump to the corresponding source location and step.
+2. Open the left `Samples` tab to load short syntax-focused programs (about 5-10 lines each).
+3. Click `Run` to execute code and generate a trace.
+4. Use the right `Heap Graph` timeline controls (buttons/slider or arrow keys) to move between steps.
+5. Check the `Console` tab for logs and runtime errors.
+6. Click graph edges to jump to the corresponding source location and step.
+
+## Sample Catalog
+
+- Simple samples include focused snippets for:
+  - variable declarations,
+  - assignments,
+  - function calls,
+  - if/else branches,
+  - for loops,
+  - array/object data-structure mutations,
+  - delete operations.
+- Complex samples include:
+  - `Doubly Linked List`
+  - `AVL Tree`
 
 ## Current Limitations
 
@@ -124,23 +139,17 @@ src/
 
 ## Task List
 
-- [x] Deliver live feedback on app init and editor changes (auto-run), plus cursor-driven step synchronization (MVP inference).
-- [x] Build a two-pane full-screen layout: editor on the left, visualization on the right.
-- [x] Support tabbed panes on both sides (Editor/Samples, Heap Graph/Details/Console).
-- [x] Add user-configurable editor preferences (font size, theme, tab size, minimap, line numbers) with persistence.
-- [x] Implement a sample JavaScript program picker with instant load/edit flow.
-- [x] Visualize runtime state as an object-reference graph (objects as nodes, references as edges).
-- [x] Use JavaScript source-to-source instrumentation to inject special tracing calls.
-- [x] Record runtime heap-related events at injected points and replay them by step.
-- [x] Provide source-location IDs and execution-order IDs for trace steps (`checkpointId` + `stepId`).
-- [x] Visualize checkpoint insertion points in the editor and show checkpoint/execution-order info on gutter hover.
-- [x] Clear function-local variables from the visible environment when function scope exits.
-- [ ] Extend execution IDs with structural context (same loop iteration, same function invocation frame, call tree linkage).
-- [ ] Optimize trace indexing for O(1)-class lookup by location ID and execution-order ID at scale.
-- [ ] Enable direct manipulation in the graph pane (drag from node to node to create a reference edge).
-- [ ] Add field-name inference for graph-created references and generate/apply the corresponding mutation.
-- [x] Show editor overlays for checkpoints (glyph/column markers) and selected execution location highlighting.
-- [ ] Add reverse-link highlighting from graph interactions to concrete assignment statements in the editor (beyond current jump/sync behavior).
-- [ ] Introduce a stable analysis runtime contract (timeouts, cancellation, isolation, deterministic snapshots).
-- [ ] Add automated test coverage for instrumentation correctness, trace replay, and graph/editor synchronization.
-- [ ] Evaluate and document modern/stable technology choices for each subsystem (editor, graph engine, parser/transform, execution sandbox).
+- [x] Auto-run on init/edit with cursor/step synchronization between Editor and Heap Graph.
+- [x] Two-pane layout with tab sets (`Editor/Samples` and `Heap Graph/Call Graph/Console`).
+- [x] Persistent editor settings UI (theme, font, wrap, minimap, rulers, etc.).
+- [x] Sample catalog expansion (short syntax-focused samples + data-structure samples) and category filtering.
+- [x] Checkpoint markers/highlighting in editor and execution-order jump integration.
+- [x] Object-reference visualization with legacy-style layout migration, redraw control, and drag behavior tuning.
+- [x] Collapsible/filterable `Call Graph` pane with step jump back to graph/editor.
+- [x] Null/undefined/NaN controls and class/variable visibility controls in graph sub-pane.
+- [ ] Improve structural execution context accuracy (loop iteration linkage and call-frame precision for repeated checkpoints).
+- [ ] Add robust built-in/library mutation modeling (e.g. `Array.prototype.push`/method internals) without recursion/stack overflow regressions.
+- [ ] Add direct graph editing workflow (create/update references from UI with inferred field mapping).
+- [ ] Improve scalability for large traces (indexing + virtualization/partial rendering).
+- [ ] Strengthen runtime contract (timeouts, cancellation semantics, deterministic replay guarantees).
+- [ ] Add automated tests for instrumentation, replay correctness, and pane synchronization.

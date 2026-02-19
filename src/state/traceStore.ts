@@ -5,6 +5,7 @@ export const emptyTrace: TraceLog = {
   steps: [{ stepId: 0, checkpointId: "__init__", varNames: [], deltaFrom: 0, deltaTo: 0 }],
   events: [],
   snapshots: [{ at: 0, state: { objects: {}, roots: {}, lastWrite: {} } }],
+  callEvents: [],
 };
 
 type TraceState = {

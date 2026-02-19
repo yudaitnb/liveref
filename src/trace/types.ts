@@ -24,6 +24,14 @@ export type DeltaEvent =
   | { t: "rootSet"; name: string; val: ValueRef; checkpointId?: CheckpointId }
   | { t: "rootDel"; name: string; checkpointId?: CheckpointId };
 
+export type CallEvent = {
+  callId: number;
+  kind: "enter" | "exit";
+  fnName: string;
+  stepId: StepId;
+  checkpointId?: CheckpointId;
+};
+
 export type HeapObject = {
   id: ObjId;
   objKind: "object" | "array" | "function" | "class";
@@ -46,4 +54,5 @@ export type TraceLog = {
   steps: StepMeta[];
   events: DeltaEvent[];
   snapshots: Snapshot[];
+  callEvents: CallEvent[];
 };

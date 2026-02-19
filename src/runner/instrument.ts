@@ -34,36 +34,6 @@ export function instrument(code: string): string {
   const instrumentPlugin = (babel: any) => {
     const t = babel.types;
 
-    const mkCheckpoint = (checkpointId: string) =>
-      markGen(
-        t.expressionStatement(
-          t.callExpression(t.identifier("__checkpoint"), [t.stringLiteral(checkpointId)])
-        )
-      );
-
-    const isCheckpointStmt = (stmt: any) =>
-      t.isExpressionStatement(stmt) &&
-      t.isCallExpression(stmt.expression) &&
-      t.isIdentifier(stmt.expression.callee, { name: "__checkpoint" });
-
-    const isTerminalControlStmt = (stmt: any) =>
-      t.isReturnStatement(stmt) ||
-      t.isThrowStatement(stmt) ||
-      t.isBreakStatement(stmt) ||
-      t.isContinueStatement(stmt);
-
-    const canCheckpointStmt = (stmt: any) => {
-      if (isCheckpointStmt(stmt)) return false;
-      if (isGen(stmt)) return false;
-
-      // ★内部生成stmtは loc が無いことが多いので、loc無しstmtにも checkpoint を入れない
-      if (!stmt.loc) return false;
-
-      if (t.isEmptyStatement(stmt)) return false;
-
-      return true;
-    };
-
     const ensureBlock = (p: any, key: string) => {
       const sub = p.get(key);
       if (!sub || sub.isBlockStatement()) return;
@@ -124,11 +94,31 @@ export function instrument(code: string): string {
       }
     };
 
+    const inferFunctionName = (path: any): string => {
+      const n = path.node;
+      if (t.isFunctionDeclaration(n) && n.id?.name) return n.id.name;
+      if (t.isFunctionExpression(n) && n.id?.name) return n.id.name;
+      if ((t.isClassMethod(n) || t.isObjectMethod(n)) && t.isIdentifier(n.key)) return n.key.name;
+      if (path.parentPath?.isVariableDeclarator() && t.isIdentifier(path.parentPath.node.id)) {
+        return path.parentPath.node.id.name;
+      }
+      if (
+        path.parentPath?.isAssignmentExpression() &&
+        t.isIdentifier(path.parentPath.node.left)
+      ) {
+        return path.parentPath.node.left.name;
+      }
+      return "anonymous";
+    };
+
     return {
       visitor: {
         Function(path: any) {
-          if (path.isArrowFunctionExpression() && !path.get("body").isBlockStatement()) return;
-          if (path.isClassMethod() && path.node.kind === "constructor") return;
+          if (path.findParent((p: any) => isGen(p.node))) return;
+          if (path.isArrowFunctionExpression() && !path.get("body").isBlockStatement()) {
+            const expr = path.get("body").node;
+            path.get("body").replaceWith(t.blockStatement([t.returnStatement(expr)]));
+          }
 
           const bodyPath = path.get("body");
           if (!bodyPath?.isBlockStatement?.()) return;
@@ -148,9 +138,9 @@ export function instrument(code: string): string {
             },
           });
 
-          if (localNames.size === 0) return;
-
-          const cpId = checkpointAfterIdOf(path.node);
+          const fnName = inferFunctionName(path);
+          const cpStartId = checkpointStartIdOf(path.node);
+          const cpEndId = checkpointAfterIdOf(path.node);
           const cleanup = Array.from(localNames)
             .sort()
             .map((name) =>
@@ -158,18 +148,41 @@ export function instrument(code: string): string {
                 t.expressionStatement(
                   t.callExpression(t.identifier("__deleteVar"), [
                     t.stringLiteral(name),
-                    t.stringLiteral(cpId),
+                    t.stringLiteral(cpEndId),
                   ])
                 )
               )
             );
 
+          const enter = markGen(
+            t.expressionStatement(
+              t.callExpression(t.identifier("__callEnter"), [
+                t.stringLiteral(fnName),
+                t.stringLiteral(cpStartId),
+              ])
+            )
+          );
+          const exit = markGen(
+            t.expressionStatement(
+              t.callExpression(t.identifier("__callExit"), [
+                t.stringLiteral(fnName),
+                t.stringLiteral(cpEndId),
+              ])
+            )
+          );
+
           const originalBody = bodyPath.node;
           bodyPath.replaceWith(
             t.blockStatement([
+              enter,
               t.tryStatement(originalBody, null, t.blockStatement(cleanup)),
             ])
           );
+          const replacedBody = bodyPath.node.body;
+          const tryStmt = replacedBody[replacedBody.length - 1];
+          if (t.isTryStatement(tryStmt) && t.isBlockStatement(tryStmt.finalizer)) {
+            tryStmt.finalizer.body.unshift(exit);
+          }
         },
 
         IfStatement(path: any) {
@@ -349,7 +362,9 @@ export function instrument(code: string): string {
               callee.name === "__writeProp" ||
               callee.name === "__deleteProp" ||
               callee.name === "__deleteVar" ||
-              callee.name === "__val")
+              callee.name === "__val" ||
+              callee.name === "__callEnter" ||
+              callee.name === "__callExit")
           ) {
             return;
           }
@@ -407,45 +422,6 @@ export function instrument(code: string): string {
           path.insertAfter(mkRootSetStmt(id.name, checkpointStartIdOf(path.node)));
         },
 
-        // ★重要：checkpoint の挿入は “変換後” にやる（exit）
-        Program: {
-          exit(path: any) {
-            const body: any[] = [];
-            for (const stmt of path.node.body) {
-              if (!canCheckpointStmt(stmt)) {
-                body.push(stmt);
-                continue;
-              }
-              if (isTerminalControlStmt(stmt)) {
-                body.push(mkCheckpoint(checkpointStartIdOf(stmt)));
-                body.push(stmt);
-                continue;
-              }
-              body.push(stmt);
-              body.push(mkCheckpoint(checkpointAfterIdOf(stmt)));
-            }
-            path.node.body = body;
-          },
-        },
-        BlockStatement: {
-          exit(path: any) {
-            const body: any[] = [];
-            for (const stmt of path.node.body) {
-              if (!canCheckpointStmt(stmt)) {
-                body.push(stmt);
-                continue;
-              }
-              if (isTerminalControlStmt(stmt)) {
-                body.push(mkCheckpoint(checkpointStartIdOf(stmt)));
-                body.push(stmt);
-                continue;
-              }
-              body.push(stmt);
-              body.push(mkCheckpoint(checkpointAfterIdOf(stmt)));
-            }
-            path.node.body = body;
-          },
-        },
       },
     };
   };

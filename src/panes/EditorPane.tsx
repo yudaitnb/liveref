@@ -1,5 +1,5 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useUIStore } from "../state/uiStore";
 import { useTraceStore } from "../state/traceStore";
 import { createRunner } from "../runner/runnerClient";
@@ -11,6 +11,7 @@ type DecoIds = string[];
 type WordWrap = "off" | "on";
 type LineNumbers = "on" | "off";
 type MonacoTheme = "vs-dark" | "vs";
+type RenderWhitespace = "none" | "boundary" | "all";
 type EditorPrefs = {
   fontSize: number;
   minimap: boolean;
@@ -18,6 +19,11 @@ type EditorPrefs = {
   tabSize: number;
   lineNumbers: LineNumbers;
   theme: MonacoTheme;
+  renderWhitespace: RenderWhitespace;
+  scrollBeyondLastLine: boolean;
+  cursorBlinking: "blink" | "smooth" | "phase";
+  rulerColumn: number;
+  bracketPairColorization: boolean;
 };
 
 const PREFS_KEY = "liveref.editor.prefs";
@@ -28,6 +34,11 @@ const defaultPrefs: EditorPrefs = {
   tabSize: 2,
   lineNumbers: "on",
   theme: "vs-dark",
+  renderWhitespace: "none",
+  scrollBeyondLastLine: false,
+  cursorBlinking: "blink",
+  rulerColumn: 100,
+  bracketPairColorization: true,
 };
 
 export default function EditorPane() {
@@ -72,6 +83,9 @@ export default function EditorPane() {
   const cursorListenerRef = useRef<{ dispose: () => void } | null>(null);
   const sortedRangesRef = useRef<CheckpointRange[]>([]);
   const inferStepForCheckpointRef = useRef<(checkpointId: string) => number | null>(() => null);
+  const skipNextCheckpointRevealRef = useRef(true);
+  const shouldAutoAlignToTailRef = useRef(true);
+  const suppressCursorSyncRef = useRef(false);
 
   // checkpointId -> candidate steps (execution order)
   const checkpointToSteps = useMemo(() => {
@@ -192,29 +206,62 @@ export default function EditorPane() {
     wordWrap: prefs.wordWrap,
     tabSize: prefs.tabSize,
     lineNumbers: prefs.lineNumbers,
+    renderWhitespace: prefs.renderWhitespace,
+    scrollBeyondLastLine: prefs.scrollBeyondLastLine,
+    cursorBlinking: prefs.cursorBlinking,
+    rulers: prefs.rulerColumn > 0 ? [prefs.rulerColumn] : [],
+    bracketPairColorization: { enabled: prefs.bracketPairColorization },
     lineNumbersMinChars: 3,
     lineDecorationsWidth: 8,
     automaticLayout: true,
   }), [prefs]);
 
+  const moveCursorToLastLine = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const lastLine = model.getLineCount();
+    const lastCol = model.getLineMaxColumn(lastLine);
+    suppressCursorSyncRef.current = true;
+    editor.setPosition({ lineNumber: lastLine, column: lastCol });
+    editor.revealPositionInCenter({ lineNumber: lastLine, column: lastCol });
+    editor.focus();
+    requestAnimationFrame(() => {
+      suppressCursorSyncRef.current = false;
+    });
+  }, []);
+
+  const moveCursorToCheckpoint = useCallback((checkpointId: string | null) => {
+    if (!checkpointId) return;
+    const p = parseCheckpointId(checkpointId);
+    if (!p) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const line = Math.max(1, Math.min(p.line, model.getLineCount()));
+    const col = Math.max(1, Math.min(p.col, model.getLineMaxColumn(line)));
+    suppressCursorSyncRef.current = true;
+    editor.setPosition({ lineNumber: line, column: col });
+    editor.revealPositionInCenter({ lineNumber: line, column: col });
+    editor.focus();
+    requestAnimationFrame(() => {
+      suppressCursorSyncRef.current = false;
+    });
+  }, []);
+
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
-
-    const model = editor.getModel();
-    if (model) {
-      const lastLine = model.getLineCount();
-      const lastCol = model.getLineMaxColumn(lastLine);
-      editor.setPosition({ lineNumber: lastLine, column: lastCol });
-      editor.revealPositionInCenter({ lineNumber: lastLine, column: lastCol });
-      editor.focus();
-    }
+    moveCursorToLastLine();
 
     // 既存 listener を剥がす
     cursorListenerRef.current?.dispose?.();
 
     // カーソル移動→対応checkpointId推定→step更新
     cursorListenerRef.current = editor.onDidChangeCursorPosition((e: any) => {
+      if (suppressCursorSyncRef.current) return;
       const line = e.position.lineNumber as number;
       const col = e.position.column as number;
 
@@ -233,10 +280,27 @@ export default function EditorPane() {
     });
   };
 
+  useEffect(() => {
+    skipNextCheckpointRevealRef.current = true;
+    shouldAutoAlignToTailRef.current = true;
+    moveCursorToLastLine();
+  }, [sampleRevision, moveCursorToLastLine]);
+
+  useEffect(() => {
+    if (!shouldAutoAlignToTailRef.current) return;
+    // Ignore resetTrace/empty trace (__init__ only). Wait for real execution trace.
+    if (trace.steps.length <= 1) return;
+    const targetStep = Math.max(0, trace.steps.length - 1); // last index
+    const checkpointId = trace.steps[targetStep]?.checkpointId ?? null;
+    setSelectedStep(targetStep);
+    setSelectedCheckpointId(checkpointId);
+    moveCursorToCheckpoint(checkpointId);
+    shouldAutoAlignToTailRef.current = false;
+  }, [trace.steps, setSelectedStep, setSelectedCheckpointId, moveCursorToCheckpoint]);
+
   const runnerRef = useRef<ReturnType<typeof createRunner> | null>(null);
   if (!runnerRef.current) runnerRef.current = createRunner();
 
-  const running = useRunStore((s) => s.running);
   const setRunning = useRunStore((s) => s.setRunning);
   const setResult = useRunStore((s) => s.setResult);
   const setError = useRunStore((s) => s.setError);
@@ -282,13 +346,6 @@ export default function EditorPane() {
     }
   }, [executeRun]);
 
-  const stopNow = () => {
-    rerunRequestedRef.current = false;
-    runnerRef.current?.stop();
-    setRunning(false);
-    setError("Stopped.");
-  };
-
   // Hard reset all runtime/UI state on sample switch.
   useEffect(() => {
     rerunRequestedRef.current = false;
@@ -307,6 +364,18 @@ export default function EditorPane() {
     }, 300);
     return () => window.clearTimeout(id);
   }, [code, requestRun]);
+
+  // External step/checkpoint selection (Graph/Details) should move editor cursor as well.
+  useEffect(() => {
+    if (!selectedCheckpointId) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const parsed = parseCheckpointId(selectedCheckpointId);
+    if (!parsed) return;
+    const pos = editor.getPosition?.();
+    if (pos && pos.lineNumber === parsed.line && pos.column === parsed.col) return;
+    moveCursorToCheckpoint(selectedCheckpointId);
+  }, [selectedCheckpointId, moveCursorToCheckpoint]);
 
 
   // ★装飾：計測ポイント（縦線/マーカー）を常時表示
@@ -375,6 +444,11 @@ export default function EditorPane() {
       },
     ]);
 
+    if (skipNextCheckpointRevealRef.current) {
+      skipNextCheckpointRevealRef.current = false;
+      return;
+    }
+
     editor.revealPositionInCenter({ lineNumber: r.startLine, column: safeCol });
   }, [selectedCheckpointId, sortedRanges]);
 
@@ -398,20 +472,68 @@ export default function EditorPane() {
     selectedVarDecosRef.current = editor.deltaDecorations(selectedVarDecosRef.current, next);
   }, [selectedVarName, code]);
 
+  const settingsPanelStyle: CSSProperties = {
+    position: "absolute",
+    right: 12,
+    bottom: 54,
+    zIndex: 20,
+    width: 300,
+    maxHeight: "62%",
+    overflow: "auto",
+    padding: 12,
+    borderRadius: 12,
+    background:
+      "linear-gradient(180deg, rgba(32,36,44,0.96) 0%, rgba(22,25,31,0.94) 100%)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    boxShadow: "0 14px 34px rgba(0,0,0,0.42)",
+    backdropFilter: "blur(6px)",
+    display: "grid",
+    gap: 2,
+    fontSize: 12,
+  };
+
+  const settingsRowStyle: CSSProperties = {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    padding: "8px 2px",
+    borderBottom: "1px solid rgba(255,255,255,0.1)",
+  };
+
+  const settingsSelectStyle: CSSProperties = {
+    minWidth: 92,
+    height: 28,
+    padding: "2px 8px",
+    borderRadius: 6,
+    border: "1px solid rgba(255,255,255,0.22)",
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(245,250,255,0.96)",
+    fontSize: 12,
+    outline: "none",
+  };
+
+  const settingsInputNumberStyle: CSSProperties = {
+    width: 74,
+    height: 28,
+    padding: "2px 8px",
+    borderRadius: 6,
+    border: "1px solid rgba(255,255,255,0.22)",
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(245,250,255,0.96)",
+    fontSize: 12,
+    outline: "none",
+  };
+
+  const settingsCheckboxStyle: CSSProperties = {
+    width: 16,
+    height: 16,
+    accentColor: "#5ad078",
+    cursor: "pointer",
+  };
+
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: 8, display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={() => void requestRun()} disabled={running} title="Run (Worker)">
-          Run
-        </button>
-        <button onClick={stopNow} disabled={!running} title="Stop (terminate worker)">
-          Stop
-        </button>
-        <span style={{ opacity: 0.7 }}>
-          timeout: 1000ms
-        </span>
-      </div>
-
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <Editor
           height="100%"
@@ -423,24 +545,32 @@ export default function EditorPane() {
           onMount={onMount}
         />
 
-        {showSettings && (
-          <div
-            style={{
-              position: "absolute",
-              right: 12,
-              bottom: 54,
-              zIndex: 20,
-              width: 260,
-              padding: 10,
-              borderRadius: 8,
-              background: "rgba(30, 30, 30, 0.95)",
-              border: "1px solid rgba(255,255,255,0.18)",
-              boxShadow: "0 6px 20px rgba(0,0,0,0.35)",
-              display: "grid",
-              gap: 10,
-              fontSize: 12,
-            }}
-          >
+        <div
+          style={{
+            ...settingsPanelStyle,
+            opacity: showSettings ? 1 : 0,
+            transform: showSettings
+              ? "translateY(0) scale(1)"
+              : "translateY(10px) scale(0.96)",
+            transformOrigin: "bottom right",
+            transition: "opacity 160ms ease, transform 200ms ease",
+            pointerEvents: showSettings ? "auto" : "none",
+            visibility: showSettings ? "visible" : "hidden",
+          }}
+        >
+            <div
+              style={{
+                padding: "2px 2px 6px",
+                borderBottom: "1px solid rgba(255,255,255,0.12)",
+                marginBottom: 2,
+                fontSize: 12,
+                fontWeight: 700,
+                letterSpacing: 0.3,
+                color: "rgba(245,250,255,0.95)",
+              }}
+            >
+              Editor Settings
+            </div>
             <label style={{ display: "grid", gap: 6 }}>
               <span>Font size: {prefs.fontSize}</span>
               <input
@@ -453,7 +583,7 @@ export default function EditorPane() {
               />
             </label>
 
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <label style={settingsRowStyle}>
               <span>Minimap</span>
               <input
                 type="checkbox"
@@ -462,29 +592,33 @@ export default function EditorPane() {
               />
             </label>
 
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <label style={settingsRowStyle}>
               <span>Theme</span>
               <select
+                className="editor-settings-select"
                 value={prefs.theme}
                 onChange={(e) => setPrefs((p) => ({ ...p, theme: e.target.value as MonacoTheme }))}
+                style={settingsSelectStyle}
               >
                 <option value="vs-dark">Dark</option>
                 <option value="vs">Light</option>
               </select>
             </label>
 
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <label style={settingsRowStyle}>
               <span>Word wrap</span>
               <select
+                className="editor-settings-select"
                 value={prefs.wordWrap}
                 onChange={(e) => setPrefs((p) => ({ ...p, wordWrap: e.target.value as WordWrap }))}
+                style={settingsSelectStyle}
               >
                 <option value="off">Off</option>
                 <option value="on">On</option>
               </select>
             </label>
 
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <label style={settingsRowStyle}>
               <span>Tab size</span>
               <input
                 type="number"
@@ -497,22 +631,90 @@ export default function EditorPane() {
                     tabSize: Math.max(1, Math.min(8, Number(e.target.value) || defaultPrefs.tabSize)),
                   }))
                 }
-                style={{ width: 70 }}
+                style={settingsInputNumberStyle}
               />
             </label>
 
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <label style={settingsRowStyle}>
               <span>Line numbers</span>
               <select
+                className="editor-settings-select"
                 value={prefs.lineNumbers}
                 onChange={(e) => setPrefs((p) => ({ ...p, lineNumbers: e.target.value as LineNumbers }))}
+                style={settingsSelectStyle}
               >
                 <option value="on">On</option>
                 <option value="off">Off</option>
               </select>
             </label>
-          </div>
-        )}
+
+            <label style={settingsRowStyle}>
+              <span>Whitespace</span>
+              <select
+                className="editor-settings-select"
+                value={prefs.renderWhitespace}
+                onChange={(e) => setPrefs((p) => ({ ...p, renderWhitespace: e.target.value as RenderWhitespace }))}
+                style={settingsSelectStyle}
+              >
+                <option value="none">None</option>
+                <option value="boundary">Boundary</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+
+            <label style={settingsRowStyle}>
+              <span>Cursor</span>
+              <select
+                className="editor-settings-select"
+                value={prefs.cursorBlinking}
+                onChange={(e) =>
+                  setPrefs((p) => ({ ...p, cursorBlinking: e.target.value as EditorPrefs["cursorBlinking"] }))
+                }
+                style={settingsSelectStyle}
+              >
+                <option value="blink">Blink</option>
+                <option value="smooth">Smooth</option>
+                <option value="phase">Phase</option>
+              </select>
+            </label>
+
+            <label style={settingsRowStyle}>
+              <span>Ruler</span>
+              <input
+                type="number"
+                min={0}
+                max={200}
+                value={prefs.rulerColumn}
+                onChange={(e) =>
+                  setPrefs((p) => ({
+                    ...p,
+                    rulerColumn: Math.max(0, Math.min(200, Number(e.target.value) || 0)),
+                  }))
+                }
+                style={settingsInputNumberStyle}
+              />
+            </label>
+
+            <label style={settingsRowStyle}>
+              <span>Scroll past end</span>
+              <input
+                type="checkbox"
+                checked={prefs.scrollBeyondLastLine}
+                onChange={(e) => setPrefs((p) => ({ ...p, scrollBeyondLastLine: e.target.checked }))}
+                style={settingsCheckboxStyle}
+              />
+            </label>
+
+            <label style={settingsRowStyle}>
+              <span>Bracket colors</span>
+              <input
+                type="checkbox"
+                checked={prefs.bracketPairColorization}
+                onChange={(e) => setPrefs((p) => ({ ...p, bracketPairColorization: e.target.checked }))}
+                style={settingsCheckboxStyle}
+              />
+            </label>
+        </div>
 
         <button
           type="button"
@@ -541,7 +743,15 @@ export default function EditorPane() {
             transition: "background 140ms ease, border-color 140ms ease, color 140ms ease",
           }}
         >
-          ⚙
+          <span
+            style={{
+              display: "inline-block",
+              transform: showSettings ? "rotate(60deg)" : "rotate(0deg)",
+              transition: "transform 220ms ease",
+            }}
+          >
+            ⚙
+          </span>
         </button>
       </div>
     </div>
